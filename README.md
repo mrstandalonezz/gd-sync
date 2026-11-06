@@ -24,6 +24,23 @@ Books/Design, not to the origin root. Untracked items push to origin/<name>.
 Finder: right-click a file/folder -> Quick Actions -> GD Push / GD Pull (refresh it from origin/<name>,
 or if it is inside the Drive origin, pull it to the workspace). Right-click a folder -> GD Pull Here… to pick
 items from the origin and pull them into that folder. (If missing: System Settings -> Extensions -> Finder.)
+## Backup config files (local stays, Drive keeps an up-to-date copy)
+
+For files that live on this Mac permanently (dotfiles, app configs) - not moved, just copied to Drive so a
+formatted Mac can get them back. Stored under `mac-backup/<Mac name>/` in the Drive root, same layout as ~.
+
+    gd backup add ~/.zshrc ~/.ssh/config ~/.config/gd   # register (and back up right away)
+    gd backup add ~/.config/port-lookup/ports.json to /resources/productivity   # your own Drive folder
+    gd backup auto on                                   # keep it current: on every change + hourly (launchd)
+    gd backup ls                                        # status of each item
+    gd backup                                           # back up changed items now
+    gd backup rm ~/.ssh/config                          # unregister (copy in Drive is kept)
+    gd restore [-n] [--force] [--from NAME]             # on a new Mac: put everything back where it was
+
+Finder: right-click -> Quick Actions -> GD Backup. Restore never overwrites a different local file unless --force,
+and makes ~/.ssh / key files private (600) again. Keys and tokens are stored as plain files in your Drive.
+Log: ~/.config/gd/backup.log
+
 Terminal Tab completion (zsh): `gd pull /<Tab>` lists the origin root, Tab again opens folders
 (also `gd ls`, `gd remote`). install.sh adds  eval "$(gd completion zsh)"  to ~/.zshrc.
 Install: ./install.sh

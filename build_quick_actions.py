@@ -1,4 +1,4 @@
-"""Builds Finder right-click Quick Actions (GD Push / GD Pull / GD Pull Here…) into ~/Library/Services."""
+"""Builds Finder right-click Quick Actions (GD Push / GD Pull / GD Pull Here… / GD Backup) into ~/Library/Services."""
 import os, plistlib, shutil, sys, uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -8,6 +8,7 @@ ACTIONS = [  # (menu name, gd finder sub-command, accepted Finder types)
     ("GD Push", "push", ["public.item"]),
     ("GD Pull", "pull", ["public.item"]),
     ("GD Pull Here…", "pullhere", ["public.folder"]),
+    ("GD Backup", "backup", ["public.item"]),
 ]
 
 

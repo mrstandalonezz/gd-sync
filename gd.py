@@ -1,28 +1,45 @@
 #!/usr/bin/env python3
 """gd - push/pull files and folders between this Mac and a Google Drive folder (like git push/pull).
 
-  gd pull NAME [to DIR] [--force] [--delete] [-n]    Drive origin/NAME  ->  DIR/NAME   (DIR defaults to workspace)
-  gd push NAME [from DIR] [--force] [--delete] [-n]  DIR/NAME  ->  Drive origin/NAME, then removes the local copy
-                                                   (like cut/paste; --keep to keep it, or "move_on_push": false)
-  gd push ~/some/path                                explicit local path -> origin/<basename>
-  gd ls [SUB]                                        list the origin folder
-  gd root [PATH|auto]                                show / set the Drive root folder on this Mac (default: auto-detect My Drive)
-  gd remote [PATH]                                   show / set origin (a folder inside the root)
-  gd workspace [DIR]                                 show / set default local folder (default ~/Desktop)
-  gd config                                          show settings
-  gd completion zsh                                  print zsh Tab completion (eval "$(gd completion zsh)")
-  gd finder push|pull|pullhere PATH...              used by the Finder right-click Quick Actions
+Work on Drive files (workspace):
+  gd pull NAME [to DIR] [--force] [-n]        Drive origin/NAME -> DIR/<basename>  (DIR defaults to workspace)
+                                              "/" = origin root, e.g. gd pull /resources/Books/test.txt
+  gd push NAME [from DIR] [--force] [--keep] [-n]
+                                              DIR/NAME -> back to where it was pulled from (else origin/NAME),
+                                              then the local copy goes to the Trash (cut/paste, no popup)
+  gd push ~/some/path                         explicit local path (same rules)
+  flags: -n dry run, --force overwrite newer files, --keep keep the local copy, --delete remove extras at destination
 
-Uses the Google Drive for desktop folder (no login needed here). Nothing is deleted unless --delete.
+Back up local config files (local stays, Drive keeps an up-to-date copy in mac-backup/<Mac name>/):
+  gd backup add PATH...                       register + back up now (to mac-backup/<Mac name>/...)
+  gd backup add PATH... to DRIVE_DIR          ...or to your own Drive folder: "to /resources/productivity"
+                                              (relative to the Drive root) or a full ~/Library/CloudStorage/... path
+  gd backup rm PATH...                        unregister (the Drive copy is kept)
+  gd backup ls                                status of each registered item
+  gd backup [-q]                              back up changed items now
+  gd backup auto on|off                       automatic: on every change + hourly (launchd)
+  gd restore [PATH...] [-n] [--force] [--from NAME]
+                                              put backups back in place (new Mac); differing local files kept unless --force
+
+Settings:
+  gd ls [SUB]                                 list the Drive origin
+  gd root [PATH|auto]                         Drive root folder on this Mac (default: auto-detect My Drive)
+  gd remote [PATH]                            origin = a folder inside the root
+  gd workspace [DIR]                          default local folder (default ~/Desktop)
+  gd config                                   show settings
+  gd completion zsh                           zsh Tab completion: eval "$(gd completion zsh)"
+  gd finder push|pull|pullhere|backup PATH... (used by the Finder Quick Actions)
+
 A file that is NEWER at the destination is skipped unless --force (so you never lose newer work).
-Config: ~/.config/gd/config.json
+Uses the Google Drive for desktop folder (no login here). Config: ~/.config/gd/config.json
 """
-import glob, json, os, shlex, shutil, subprocess, sys
+import filecmp, glob, json, os, shlex, shutil, subprocess, sys
 
 CFG_DIR = os.path.expanduser("~/.config/gd")
 CFG = os.path.join(CFG_DIR, "config.json")
 LINKS = os.path.join(CFG_DIR, "links.json")  # local abs path -> origin-relative path it was pulled from / pushed to
 DEFAULTS = {"origin": "", "workspace": "~/Desktop", "mount": "", "confirm_overwrite": True, "move_on_push": True,
+            "backup": [], "backup_dir": "", "backup_dest": {},
             "exclude": [".DS_Store", "node_modules", "__pycache__", ".venv"]}
 TOL = 2  # seconds of mtime tolerance (Drive rounds timestamps)
 
@@ -146,8 +163,11 @@ def plan(src, dst, exclude, delete=False):
             p["new"].append(rel)
             continue
         ss, ds = os.stat(s), os.stat(d)
-        if ss.st_size == ds.st_size and abs(ss.st_mtime - ds.st_mtime) <= TOL:
-            p["same"].append(rel)
+        close = abs(ss.st_mtime - ds.st_mtime) <= TOL  # Drive rounds timestamps, so allow a little slack...
+        if ss.st_size == ds.st_size and close and (ss.st_mtime == ds.st_mtime or filecmp.cmp(s, d, shallow=False)):
+            p["same"].append(rel)  # ...but when they are not identical, compare the bytes (fast same-size edits)
+        elif close:
+            p["update"].append(rel)
         elif ss.st_mtime < ds.st_mtime - TOL:
             p["conflict"].append(rel)  # destination is newer
         else:
@@ -167,6 +187,10 @@ def apply_plan(p, force=False):
         shutil.copyfile(s, d)
         st = os.stat(s)
         os.utime(d, (st.st_atime, st.st_mtime))  # keep mtime so the next compare says "same"
+        try:
+            shutil.copymode(s, d)  # keep permissions (e.g. 600 on ~/.ssh files)
+        except OSError:
+            pass
     return len(todo)
 
 
@@ -421,6 +445,13 @@ def alfred(query):
                 target = comp.strip("/") if cmd == "remote" else comp
                 item(os.path.basename(comp) + "/", f"{full}   (Tab = open, Enter = set {label})",
                      f"{cmd}{TAB}{target}", auto=f"{cmd} {comp}/")
+    elif cmd == "backup":
+        n = len(cfg["backup"])
+        item(f"Back up now ({n} item{'s' if n != 1 else ''} registered)",
+             "Copy changed config files to Drive. Register more: right-click → GD Backup, or gd backup add PATH",
+             f"backup{TAB}")
+        for key in cfg["backup"]:
+            item(key, "registered for backup")
     elif cmd == "config":
         try:
             mount = mount_root(cfg)
@@ -433,7 +464,7 @@ def alfred(query):
         for c, sub in (("pull", "Drive → this Mac"), ("push", "this Mac → Drive"), ("ls", "list the Drive origin"),
                        ("root", "set the Drive root folder on this Mac"),
                        ("remote", "set the Drive origin folder"), ("workspace", "set the default local folder"),
-                       ("config", "show settings")):
+                       ("config", "show settings"), ("backup", "back up registered config files to Drive now")):
             if not cmd or c.startswith(cmd):
                 item("gd " + c, sub, auto=c + " ")
     print(json.dumps({"items": items}))
@@ -458,6 +489,8 @@ def run_ui(arg):
             cfg["workspace"] = parts[1]
             save(cfg)
             notify("gd", f"Workspace set to {parts[1]}")
+        elif kind == "backup":
+            notify("✅ gd backup", backup_run(cfg, quiet=True) or "Drive not available")
         elif kind == "open":
             subprocess.run(["open", parts[1]])
         elif kind == "edit":
@@ -506,6 +539,12 @@ def finder(kind, paths):
                 notify("gd pull", f"{os.path.basename(p)} is in Drive but outside the origin '{cfg['origin']}'")
             else:  # a local item -> refresh it from where it was pulled from (else origin/<name>)
                 run_ui(f"pull{TAB}{tracked(p)}{TAB}{os.path.dirname(p)}")
+        elif kind == "backup":  # register + back up now; the local item stays where it is
+            try:
+                backup_add(cfg, [p])
+                notify("✅ gd backup", backup_run(load(), quiet=True, only=[to_key(p)]) or "done")
+            except SystemExit as e:
+                notify("⚠️ gd backup failed", str(e))
         elif kind == "pullhere":
             target = p if os.path.isdir(p) else os.path.dirname(p)
             names = list_dir(origin)
@@ -515,12 +554,231 @@ def finder(kind, paths):
                 run_ui(f"pull{TAB}{name}{TAB}{target}")
 
 
+# ---------- backup (local stays the source of truth, Drive keeps a copy) ----------
+BACKUP_LOG = os.path.join(CFG_DIR, "backup.log")
+AGENT = "com.gd-sync.backup"
+AGENT_PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{AGENT}.plist")
+REGISTRY = ".gd-backup.json"  # list of registered items, stored in the Drive backup folder for restore
+SECRETS = ("id_rsa", "id_ed25519", "id_ecdsa", ".pem", ".key", ".p12", ".env", "credential", "token", "secret")
+
+
+def machine_name():
+    try:
+        name = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True).stdout.strip()
+    except Exception:
+        name = ""
+    import re
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", (name or os.uname().nodename).replace("’", "").replace("'", ""))
+    return name.strip("-") or "mac"
+
+
+def backup_root(cfg, machine=None):
+    rel = f"mac-backup/{machine}" if machine else (cfg["backup_dir"] or f"mac-backup/{machine_name()}")
+    return os.path.join(mount_root(cfg), rel)
+
+
+def to_key(path):
+    """~/x/y -> "~/x/y" (home-relative, portable across Macs); other absolute paths stay absolute."""
+    path = os.path.abspath(os.path.expanduser(path)).rstrip("/")
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if inside(path, home) else path
+
+
+def key_paths(cfg, key, machine=None, dests=None):
+    """registered key -> (local path, path of its copy in Drive).
+    Custom destination (gd backup add X to DIR): <Drive root>/DIR/<basename>.
+    Default: mac-backup/<Mac>/ with the home-relative path, e.g. ~/.ssh/config -> mac-backup/<Mac>/.ssh/config."""
+    dest = (cfg["backup_dest"] if dests is None else dests).get(key)
+    if dest is not None:
+        return os.path.expanduser(key), os.path.join(mount_root(cfg), dest, os.path.basename(key))
+    rel = key[2:] if key.startswith("~/") else "_root" + key  # /etc/x -> _root/etc/x
+    return os.path.expanduser(key), os.path.join(backup_root(cfg, machine), rel)
+
+
+def drive_dir(cfg, where):
+    """'to' folder -> path relative to the Drive root.
+    Accepts a full path inside Drive (~/Library/CloudStorage/.../second-brain/x), or '/x' / 'x' relative to the root."""
+    root = mount_root(cfg)
+    full = os.path.abspath(os.path.expanduser(where))
+    top = "/" + where.strip("/").split("/")[0]
+    if not (where.startswith("~") or inside(full, root) or os.path.exists(top)):
+        full = os.path.join(root, where.strip("/"))  # '/resources/x' = <Drive root>/resources/x
+    if not inside(full, root):
+        raise SystemExit(f"'{where}' is not inside the Drive root {root}")
+    rel = os.path.relpath(os.path.realpath(full), os.path.realpath(root))
+    return "" if rel == "." else rel
+
+
+def backup_add(cfg, paths, to=None):
+    dest = drive_dir(cfg, to) if to else None
+    if not cfg["backup_dir"]:
+        cfg["backup_dir"] = f"mac-backup/{machine_name()}"  # fixed once, so renaming the Mac keeps the folder
+    for p in paths:
+        key, full = to_key(p), os.path.abspath(os.path.expanduser(p))
+        if not os.path.exists(full):
+            print(f"skip (not found): {full}")
+            continue
+        if inside(full, mount_root(cfg)):
+            print(f"skip (already in Drive): {full}")
+            continue
+        if key not in cfg["backup"]:
+            cfg["backup"].append(key)
+        if dest is not None:
+            cfg["backup_dest"][key] = dest
+        else:
+            cfg["backup_dest"].pop(key, None)
+        warn = any(x in os.path.basename(full).lower() for x in SECRETS)
+        print(f"added {key}" + ("   ⚠️ looks like a key/secret: it will be stored as a plain file in your Drive"
+                                if warn else ""))
+    save(cfg)
+    if os.path.exists(AGENT_PLIST):
+        backup_auto(cfg, True, quiet=True)  # refresh the watched paths
+
+
+def backup_rm(cfg, paths):
+    for p in paths:
+        key = to_key(p)
+        if key in cfg["backup"]:
+            cfg["backup"].remove(key)
+            cfg["backup_dest"].pop(key, None)
+            print(f"removed {key} (the copy in Drive is kept)")
+        else:
+            print(f"not registered: {key}")
+    save(cfg)
+    if os.path.exists(AGENT_PLIST):
+        backup_auto(cfg, True, quiet=True)
+
+
+def backup_run(cfg, quiet=False, only=None):
+    """Copy every registered item that changed to Drive. Never touches the local files."""
+    try:
+        root = backup_root(cfg)
+    except SystemExit as e:  # Drive not mounted (e.g. not signed in yet): try again next time
+        if not quiet:
+            print(e)
+        return
+    exclude, lines, changed = set(cfg["exclude"]), [], 0
+    for key in only or cfg["backup"]:
+        local, remote = key_paths(cfg, key)
+        if not os.path.exists(local):
+            lines.append(f"missing locally: {key}")
+            continue
+        own_logs = {"backup.log", "finder.log"} if inside(CFG_DIR, local) else set()  # avoid a change->backup loop
+        p = plan(local, remote, exclude | own_logs)
+        n = len(p["new"]) + len(p["update"]) + len(p["conflict"])
+        if n:
+            apply_plan(p, force=True)  # this Mac is the source of truth
+            changed += n
+            lines.append(f"{key}: {n} file(s) backed up")
+    os.makedirs(root, exist_ok=True)
+    with open(os.path.join(root, REGISTRY), "w") as f:
+        json.dump({"machine": machine_name(), "home": os.path.expanduser("~"), "items": cfg["backup"],
+                   "dest": cfg["backup_dest"]}, f, indent=2)
+    msg = f"backup: {changed} file(s) updated, {len(cfg['backup'])} item(s) registered"
+    if changed or not quiet:
+        os.makedirs(CFG_DIR, exist_ok=True)
+        import time
+        with open(BACKUP_LOG, "a") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "".join("\n    " + l for l in lines) + "\n")
+    if not quiet:
+        print("\n".join(lines + [msg]))
+    return msg
+
+
+def backup_ls(cfg):
+    if not cfg["backup"]:
+        print("nothing registered (gd backup add PATH)")
+    for key in cfg["backup"]:
+        local, remote = key_paths(cfg, key)
+        state = "missing locally" if not os.path.exists(local) else \
+            "not backed up yet" if not os.path.exists(remote) else \
+            "up to date" if not any(plan(local, remote, set(cfg["exclude"]))[k] for k in ("new", "update", "conflict")) \
+            else "changed since last backup"
+        where = os.path.relpath(os.path.dirname(remote), mount_root(cfg))
+        print(f"{key:45} {state:26} -> {where}/")
+    print(f"\nDrive folder: {backup_root(cfg)}\nauto backup: {'on' if os.path.exists(AGENT_PLIST) else 'off'}")
+
+
+def backup_auto(cfg, on, quiet=False):
+    import plistlib
+    uid = str(os.getuid())
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}/{AGENT}"], capture_output=True)
+    if not on:
+        if os.path.exists(AGENT_PLIST):
+            os.remove(AGENT_PLIST)
+        return print("auto backup off")
+    watch = [os.path.expanduser(k) for k in cfg["backup"] if os.path.exists(os.path.expanduser(k))]
+    agent = {"Label": AGENT,
+             "ProgramArguments": ["/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable,
+                                  os.path.realpath(__file__), "backup", "-q"],
+             "WatchPaths": watch,      # run when a registered file/folder changes
+             "StartInterval": 3600,    # and hourly, to catch changes deep inside folders
+             "RunAtLoad": True, "ThrottleInterval": 30, "ProcessType": "Background",
+             "StandardErrorPath": BACKUP_LOG}
+    os.makedirs(os.path.dirname(AGENT_PLIST), exist_ok=True)
+    with open(AGENT_PLIST, "wb") as f:
+        plistlib.dump(agent, f)
+    r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", AGENT_PLIST], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit(f"launchctl failed: {r.stderr.strip()}")
+    if not quiet:
+        print(f"auto backup on: on change of {len(watch)} item(s) + hourly. Log: {BACKUP_LOG}")
+
+
+def restore(cfg, paths, force=False, machine=None, dry=False):
+    """Copy backups from Drive back to where they belong. Existing different local files are kept unless --force."""
+    root = backup_root(cfg, machine)
+    reg = os.path.join(root, REGISTRY)
+    if not os.path.exists(reg):
+        others = list_dir(os.path.join(mount_root(cfg), "mac-backup"))
+        raise SystemExit(f"No backup at {root}" + (f"\nAvailable: {', '.join(others)}  (use --from NAME)" if others else ""))
+    with open(reg) as f:
+        reg = json.load(f)
+    items, dests = reg["items"], reg.get("dest", {})
+    keys = [to_key(p) for p in paths] if paths else items
+    total = {"new": 0, "same": 0, "kept": 0, "overwritten": 0}
+    for key in keys:
+        local, remote = key_paths(cfg, key, machine, dests)
+        if not os.path.exists(remote):
+            print(f"not in backup: {key}")
+            continue
+        p = plan(remote, local, set())
+        differ = p["update"] + p["conflict"]
+        if not dry:
+            apply_plan({"new": p["new"], "update": differ if force else [], "conflict": [], "_pairs": p["_pairs"]})
+        total["new"] += len(p["new"])
+        total["same"] += len(p["same"])
+        total["overwritten" if force else "kept"] += len(differ)
+        print(f"{key}: {len(p['new'])} restored" + (f", {len(differ)} differ locally " +
+              ("(overwritten)" if force else "(kept, use --force)") if differ else ""))
+        if not dry:  # Drive may not keep unix permissions: make private files private again
+            for rel in p["new"] + (differ if force else []):
+                d = p["_pairs"][rel][1]
+                if "/.ssh/" in d or "/.gnupg/" in d or any(x in os.path.basename(d).lower() for x in SECRETS):
+                    os.chmod(d, 0o600)
+        if key not in cfg["backup"] and not dry:
+            cfg["backup"].append(key)  # keep backing it up on this Mac
+            if key in dests:
+                cfg["backup_dest"][key] = dests[key]
+    if not dry:
+        if not cfg["backup_dir"]:
+            cfg["backup_dir"] = os.path.relpath(root, mount_root(cfg))
+        save(cfg)
+    print(("[dry run] " if dry else "") + f"restore: {total['new']} restored, {total['same']} already same, "
+          f"{total['kept']} kept (differ), {total['overwritten']} overwritten")
+
+
 # ---------- shell completion ----------
 ZSH_COMPLETION = r"""
 _gd() {
   local cmd=${words[2]} prev=${words[CURRENT-1]}
   if (( CURRENT == 2 )); then
-    compadd pull push ls root remote workspace config completion
+    compadd pull push ls root remote workspace config backup restore completion
+    return
+  fi
+  if [[ $cmd == backup && $prev == to ]]; then
+    local -a d; d=("${(@f)$(gd _complete remote "${(Q)PREFIX}" 2>/dev/null)}")
+    (( $#d )) && compadd -U -S '' -- $d
     return
   fi
   if [[ $prev == (to|from) ]]; then _files -/; return; fi
@@ -532,6 +790,11 @@ _gd() {
       (( $#dirs ))  && compadd -U -S '' -- $dirs     # folders: no space, keep tabbing
       (( $#files )) && compadd -U -- $files ;;
     push) _files ;;
+    backup)
+      if (( CURRENT == 3 )); then compadd add rm ls auto
+      elif [[ ${words[3]} == auto ]]; then compadd on off
+      else _files; fi ;;
+    restore) _files ;;
     workspace|root) _files -/ ;;
   esac
 }
@@ -594,13 +857,39 @@ def cli(argv):
     elif cmd == "config":
         print(json.dumps(cfg, indent=2))
         print("drive folder:", mount_root(cfg))
+    elif cmd == "backup":
+        sub = args[0] if args else ""
+        if sub == "add" and args[1:]:
+            paths, to = args[1:], None
+            if "to" in paths[:-1]:  # gd backup add A B to resources/productivity
+                i = paths.index("to")
+                paths, to = paths[:i], " ".join(paths[i + 1:])
+            backup_add(cfg, paths, to)
+            backup_run(load(), only=[to_key(p) for p in paths if to_key(p) in load()["backup"]])
+        elif sub == "rm" and args[1:]:
+            backup_rm(cfg, args[1:])
+        elif sub in ("ls", "list", "status"):
+            backup_ls(cfg)
+        elif sub == "auto" and args[1:2] in (["on"], ["off"]):
+            backup_auto(cfg, args[1] == "on")
+        elif not sub:
+            backup_run(cfg, quiet="-q" in flags)
+        else:
+            raise SystemExit("usage: gd backup [add PATH... | rm PATH... | ls | auto on|off] [-q]")
+    elif cmd == "restore":
+        machine = None
+        if "--from" in rest:
+            i = rest.index("--from")
+            machine = rest[i + 1] if i + 1 < len(rest) else None
+            args = [a for a in args if a != machine]
+        restore(cfg, args, force="--force" in flags, machine=machine, dry="-n" in flags)
     elif cmd == "completion":
         print(ZSH_COMPLETION)
     elif cmd == "_complete":
         complete(rest[0], rest[1] if len(rest) > 1 else "")
     elif cmd == "finder":
-        if len(rest) < 2 or rest[0] not in ("push", "pull", "pullhere"):
-            raise SystemExit("usage: gd finder push|pull|pullhere PATH...")
+        if len(rest) < 2 or rest[0] not in ("push", "pull", "pullhere", "backup"):
+            raise SystemExit("usage: gd finder push|pull|pullhere|backup PATH...")
         finder(rest[0], rest[1:])
     elif cmd == "alfred":
         alfred(" ".join(args) if args else "")
