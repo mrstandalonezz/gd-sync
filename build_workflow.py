@@ -13,11 +13,11 @@ plist = {
             "alfredfiltersresults": False, "alfredfiltersresultsmatchmode": 2,
             "argumenttreatemptyqueryasnil": False, "argumenttrimmode": 0, "argumenttype": 1, "escaping": 102,
             "keyword": "gd", "queuedelaycustom": 3, "queuedelayimmediatelyinitially": True, "queuedelaymode": 0,
-            "queuemode": 1, "runningsubtext": "", "script": 'python3 ./gd.py alfred "$1"', "scriptargtype": 1,
+            "queuemode": 1, "runningsubtext": "", "script": 'GD="$HOME/.local/bin/gd"; [ -e "$GD" ] || GD=./gd.py; python3 "$GD" alfred "$1"', "scriptargtype": 1,
             "scriptfile": "", "subtext": "pull / push files with Google Drive", "title": "GD Sync", "type": 0,
             "withspace": True}},
         {"uid": RS, "type": "alfred.workflow.action.script", "version": 2, "config": {
-            "concurrently": False, "escaping": 102, "script": 'python3 ./gd.py run "$1"', "scriptargtype": 1,
+            "concurrently": False, "escaping": 102, "script": 'GD="$HOME/.local/bin/gd"; [ -e "$GD" ] || GD=./gd.py; python3 "$GD" run "$1"', "scriptargtype": 1,
             "scriptfile": "", "type": 0}},
     ],
     "uidata": {SF: {"xpos": 40, "ypos": 40}, RS: {"xpos": 300, "ypos": 40}},

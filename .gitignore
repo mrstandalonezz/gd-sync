@@ -1,0 +1,14 @@
+# macOS / Python noise
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+
+# never commit local settings, secrets or logs (gd keeps its own in ~/.config/gd, outside the repo)
+.env
+.env.*
+*.log
+config.json
+links.json
+*.pem
+*.key
